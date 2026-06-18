@@ -11,6 +11,26 @@ npm run dev             # development with nodemon
 npm start               # production
 ```
 
+## Redis Cache
+
+The admin stats endpoint uses Redis as an optional cache. If Redis is not running,
+the API falls back to MongoDB automatically.
+
+Local Redis with Docker:
+
+```bash
+docker run --name volunteer-redis -p 6379:6379 -d redis
+```
+
+Environment variables:
+
+```bash
+REDIS_URL=redis://localhost:6379
+REDIS_ENABLED=true
+```
+
+Set `REDIS_ENABLED=false` to disable Redis without changing code.
+
 ## Project Structure
 
 ```

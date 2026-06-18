@@ -1,5 +1,7 @@
 import jwt from "jsonwebtoken";
 import User from "../models/User.js";
+import Volunteer from "../models/Volunteer.js";
+import { clearStatsCache } from "../utils/cache.js";
 
 const generateToken = (id) => {
   return jwt.sign({ id }, process.env.JWT_SECRET, {
@@ -7,37 +9,60 @@ const generateToken = (id) => {
   });
 };
 
+const toAuthUser = (account, fallbackRole = "volunteer") => ({
+  _id: account._id,
+  name: account.name,
+  email: account.email,
+  role: account.role || fallbackRole,
+  phone: account.phone,
+  city: account.city,
+  skills: account.skills,
+  availability: account.availability,
+  status: account.status,
+  hoursContributed: account.hoursContributed,
+  avatar: account.avatar,
+  notes: account.notes,
+  createdAt: account.createdAt,
+});
+
 // POST /api/v1/auth/register
 export const register = async (req, res) => {
   try {
     const { name, email, password, role } = req.body;
+    const normalizedRole = role === "admin" ? "admin" : "volunteer";
 
-    const existing = await User.findOne({ email });
+    const existingUser = await User.findOne({ email });
+    const existingVolunteer = await Volunteer.findOne({ email });
 
-    if (existing) {
+    if (existingUser || existingVolunteer) {
       return res.status(400).json({
         success: false,
         message: "Email already registered",
       });
     }
 
-    const user = await User.create({
-      name,
-      email,
-      password,
-      role,
-    });
+    const account =
+      normalizedRole === "volunteer"
+        ? await Volunteer.create({
+            name,
+            email,
+            password,
+            role: "volunteer",
+          })
+        : await User.create({
+            name,
+            email,
+            password,
+            role: "admin",
+          });
+
+    await clearStatsCache();
 
     res.status(201).json({
       success: true,
       message: "Account created successfully",
-      token: generateToken(user._id),
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-      },
+      token: generateToken(account._id),
+      user: toAuthUser(account, normalizedRole),
     });
   } catch (error) {
     res.status(500).json({
@@ -59,24 +84,25 @@ export const login = async (req, res) => {
       });
     }
 
-    const user = await User.findOne({ email }).select("+password");
+    let account = await Volunteer.findOne({ email }).select("+password");
 
-    if (!user || !(await user.matchPassword(password))) {
+    if (!account) {
+      account = await User.findOne({ email }).select("+password");
+    }
+
+    if (!account || !(await account.matchPassword(password))) {
       return res.status(401).json({
         success: false,
         message: "Invalid email or password",
       });
     }
 
+    const role = account.role || "volunteer";
+
     res.json({
       success: true,
-      token: generateToken(user._id),
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-      },
+      token: generateToken(account._id),
+      user: toAuthUser(account, role),
     });
   } catch (error) {
     res.status(500).json({
@@ -90,11 +116,6 @@ export const login = async (req, res) => {
 export const getMe = async (req, res) => {
   res.json({
     success: true,
-    user: {
-      id: req.user._id,
-      name: req.user.name,
-      email: req.user.email,
-      role: req.user.role,
-    },
+    user: toAuthUser(req.user, req.user.role || "volunteer"),
   });
 };

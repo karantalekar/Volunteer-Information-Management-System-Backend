@@ -1,4 +1,39 @@
 import Volunteer from "../models/Volunteer.js";
+import Event from "../models/Event.js";
+import User from "../models/User.js";
+import Notification from "../models/Notification.js";
+import { clearStatsCache } from "../utils/cache.js";
+
+const resolveVolunteerForCurrentUser = async (req, id) => {
+  let volunteer = await Volunteer.findById(id);
+
+  if (volunteer || !req.user || req.user.role === "admin") {
+    return volunteer;
+  }
+
+  if (req.user._id.toString() !== id.toString()) {
+    return null;
+  }
+
+  if (req.user.email) {
+    volunteer = await Volunteer.findOne({ email: req.user.email });
+  }
+
+  if (!volunteer) {
+    const user = await User.findById(req.user._id).select("+password");
+
+    if (user) {
+      volunteer = await Volunteer.create({
+        name: user.name,
+        email: user.email,
+        password: user.password,
+        role: "volunteer",
+      });
+    }
+  }
+
+  return volunteer;
+};
 
 // GET /api/v1/volunteers
 const getAllVolunteers = async (req, res) => {
@@ -8,13 +43,12 @@ const getAllVolunteers = async (req, res) => {
     const filter = {};
 
     if (status) filter.status = status;
-    if (skill) filter.skill = skill;
+    if (skill) filter.skills = skill;
     if (city) filter.city = new RegExp(city, "i");
 
     if (search) {
       filter.$or = [
-        { firstName: new RegExp(search, "i") },
-        { lastName: new RegExp(search, "i") },
+        { name: new RegExp(search, "i") },
         { email: new RegExp(search, "i") },
       ];
     }
@@ -22,7 +56,11 @@ const getAllVolunteers = async (req, res) => {
     const total = await Volunteer.countDocuments(filter);
 
     const volunteers = await Volunteer.find(filter)
-      .populate("eventsEnrolled", "name date")
+      .populate({
+        path: "eventsJoined",
+        model: Event,
+        select: "name date location category",
+      })
       .sort({ createdAt: -1 })
       .skip((Number(page) - 1) * Number(limit))
       .limit(Number(limit));
@@ -47,7 +85,7 @@ const getAllVolunteers = async (req, res) => {
 const getVolunteer = async (req, res) => {
   try {
     const volunteer = await Volunteer.findById(req.params.id).populate(
-      "eventsEnrolled",
+      "eventsJoined",
       "name date location category",
     );
 
@@ -73,16 +111,15 @@ const getVolunteer = async (req, res) => {
 // POST /api/v1/volunteers
 const createVolunteer = async (req, res) => {
   try {
-    const {
-      firstName,
-      lastName,
-      email,
-      phone,
-      city,
-      skill,
-      availability,
-      notes,
-    } = req.body;
+    const { name, email, password, phone, city, skills, availability, notes } =
+      req.body;
+
+    if (!name || !email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Name, email, and password are required",
+      });
+    }
 
     const existing = await Volunteer.findOne({ email });
 
@@ -94,15 +131,17 @@ const createVolunteer = async (req, res) => {
     }
 
     const volunteer = await Volunteer.create({
-      firstName,
-      lastName,
+      name,
       email,
-      phone,
-      city,
-      skill,
-      availability,
-      notes,
+      password,
+      phone: phone || "",
+      city: city || "",
+      skills: Array.isArray(skills) ? skills : [],
+      availability: availability || "Weekends",
+      notes: notes || "",
     });
+
+    await clearStatsCache();
 
     res.status(201).json({
       success: true,
@@ -120,14 +159,7 @@ const createVolunteer = async (req, res) => {
 // PUT /api/v1/volunteers/:id
 const updateVolunteer = async (req, res) => {
   try {
-    const volunteer = await Volunteer.findByIdAndUpdate(
-      req.params.id,
-      req.body,
-      {
-        new: true,
-        runValidators: true,
-      },
-    );
+    const volunteer = await resolveVolunteerForCurrentUser(req, req.params.id);
 
     if (!volunteer) {
       return res.status(404).json({
@@ -136,10 +168,85 @@ const updateVolunteer = async (req, res) => {
       });
     }
 
+    if (
+      req.user.role !== "admin" &&
+      volunteer._id.toString() !== req.user._id.toString() &&
+      volunteer.email !== req.user.email
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "You can only update your own profile",
+      });
+    }
+
+    const allowedFields = [
+      "name",
+      "phone",
+      "city",
+      "skills",
+      "availability",
+      "status",
+      "avatar",
+      "notes",
+    ];
+    const updateData = {};
+
+    allowedFields.forEach((field) => {
+      if (req.body[field] !== undefined) {
+        updateData[field] = req.body[field];
+      }
+    });
+
+    if (req.user.role !== "admin") {
+      delete updateData.status;
+    }
+
+    const shouldNotifyAccountConfirmed =
+      req.user.role === "admin" &&
+      updateData.status === "active" &&
+      volunteer.status !== "active";
+
+    const updatedVolunteer = await Volunteer.findByIdAndUpdate(
+      volunteer._id,
+      updateData,
+      {
+        new: true,
+        runValidators: true,
+      },
+    );
+
+    if (shouldNotifyAccountConfirmed) {
+      await Notification.findOneAndUpdate(
+        {
+          volunteer: volunteer._id,
+          type: "account_confirmation",
+        },
+        {
+          volunteer: volunteer._id,
+          type: "account_confirmation",
+          title: "Account confirmed",
+          message:
+            "Your volunteer account has been approved. You can now access volunteer features and join events.",
+          status: "info",
+          read: false,
+          sentBy: req.user._id,
+          respondedAt: null,
+        },
+        {
+          new: true,
+          upsert: true,
+          runValidators: true,
+          setDefaultsOnInsert: true,
+        },
+      );
+    }
+
+    await clearStatsCache();
+
     res.json({
       success: true,
       message: "Volunteer updated",
-      data: volunteer,
+      data: updatedVolunteer,
     });
   } catch (error) {
     res.status(500).json({
@@ -160,6 +267,8 @@ const deleteVolunteer = async (req, res) => {
         message: "Volunteer not found",
       });
     }
+
+    await clearStatsCache();
 
     res.json({
       success: true,
@@ -204,10 +313,12 @@ const updateHours = async (req, res) => {
       });
     }
 
+    await clearStatsCache();
+
     res.json({
       success: true,
-      message: `${hours} hours added`,
-      totalHours: volunteer.hoursContributed,
+      message: "Volunteer hours updated",
+      data: volunteer,
     });
   } catch (error) {
     res.status(500).json({

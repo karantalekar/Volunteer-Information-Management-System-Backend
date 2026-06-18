@@ -1,5 +1,40 @@
 import Event from "../models/Event.js";
 import Volunteer from "../models/Volunteer.js";
+import User from "../models/User.js";
+import { clearStatsCache } from "../utils/cache.js";
+
+const getVolunteerForEnrollment = async (req) => {
+  const requestedVolunteerId = req.body.volunteerId;
+
+  if (requestedVolunteerId) {
+    return Volunteer.findById(requestedVolunteerId);
+  }
+
+  if (!req.user?._id) {
+    return null;
+  }
+
+  let volunteer = await Volunteer.findById(req.user._id);
+
+  if (!volunteer && req.user.email) {
+    volunteer = await Volunteer.findOne({ email: req.user.email });
+  }
+
+  if (!volunteer && req.user.role === "volunteer") {
+    const user = await User.findById(req.user._id).select("+password");
+
+    if (user) {
+      volunteer = await Volunteer.create({
+        name: user.name,
+        email: user.email,
+        password: user.password,
+        role: "volunteer",
+      });
+    }
+  }
+
+  return volunteer;
+};
 
 // GET /api/v1/events
 const getAllEvents = async (req, res) => {
@@ -12,7 +47,7 @@ const getAllEvents = async (req, res) => {
     if (upcoming === "true") filter.date = { $gte: new Date() };
 
     const events = await Event.find(filter)
-      .populate("enrolledVolunteers", "firstName lastName email")
+      .populate("enrolledVolunteers", "name email skills city")
       .populate("createdBy", "name")
       .sort({ date: 1 });
 
@@ -33,7 +68,7 @@ const getAllEvents = async (req, res) => {
 const getEvent = async (req, res) => {
   try {
     const event = await Event.findById(req.params.id)
-      .populate("enrolledVolunteers", "firstName lastName email skill city")
+      .populate("enrolledVolunteers", "name email skills city")
       .populate("createdBy", "name email");
 
     if (!event) {
@@ -58,18 +93,37 @@ const getEvent = async (req, res) => {
 // POST /api/v1/events (admin only)
 const createEvent = async (req, res) => {
   try {
-    const { name, description, date, location, category, volunteersNeeded } =
-      req.body;
+    // const { name, description, date, location, category, volunteersNeeded } =
+    //   req.body;
 
-    const event = await Event.create({
+    const {
       name,
       description,
       date,
+      endDate,
       location,
       category,
       volunteersNeeded,
+      status,
+      image,
+      organizer,
+    } = req.body;
+
+    const event = await Event.create({
+      name,
+      description: description || "",
+      date,
+      endDate: endDate || null,
+      location,
+      category,
+      volunteersNeeded,
+      status: status || "upcoming",
+      image: image || "",
+      organizer: organizer || "",
       createdBy: req.user._id,
     });
+
+    await clearStatsCache();
 
     res.status(201).json({
       success: true,
@@ -99,6 +153,8 @@ const updateEvent = async (req, res) => {
       });
     }
 
+    await clearStatsCache();
+
     res.json({
       success: true,
       message: "Event updated",
@@ -124,6 +180,8 @@ const deleteEvent = async (req, res) => {
       });
     }
 
+    await clearStatsCache();
+
     res.json({
       success: true,
       message: "Event deleted",
@@ -139,14 +197,34 @@ const deleteEvent = async (req, res) => {
 // POST /api/v1/events/:id/enroll
 const enrollVolunteer = async (req, res) => {
   try {
-    const { volunteerId } = req.body;
-
     const event = await Event.findById(req.params.id);
 
     if (!event) {
       return res.status(404).json({
         success: false,
         message: "Event not found",
+      });
+    }
+
+    const volunteer = await getVolunteerForEnrollment(req);
+
+    if (!volunteer) {
+      return res.status(400).json({
+        success: false,
+        message: "Volunteer profile not found",
+      });
+    }
+
+    const volunteerId = volunteer._id;
+
+    if (
+      event.enrolledVolunteers.some(
+        (id) => id.toString() === volunteerId.toString(),
+      )
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Volunteer already enrolled",
       });
     }
 
@@ -157,21 +235,20 @@ const enrollVolunteer = async (req, res) => {
       });
     }
 
-    if (event.enrolledVolunteers.includes(volunteerId)) {
-      return res.status(400).json({
-        success: false,
-        message: "Volunteer already enrolled",
-      });
-    }
-
     event.enrolledVolunteers.push(volunteerId);
     await event.save();
 
-    await Volunteer.findByIdAndUpdate(volunteerId, {
-      $addToSet: {
-        eventsEnrolled: event._id,
+    await Volunteer.findByIdAndUpdate(
+      volunteerId,
+      {
+        $addToSet: {
+          eventsJoined: event._id,
+        },
       },
-    });
+      { new: true },
+    );
+
+    await clearStatsCache();
 
     res.json({
       success: true,
@@ -189,8 +266,6 @@ const enrollVolunteer = async (req, res) => {
 // DELETE /api/v1/events/:id/unenroll
 const unenrollVolunteer = async (req, res) => {
   try {
-    const { volunteerId } = req.body;
-
     const event = await Event.findById(req.params.id);
 
     if (!event) {
@@ -200,17 +275,34 @@ const unenrollVolunteer = async (req, res) => {
       });
     }
 
+    const volunteer = await getVolunteerForEnrollment(req);
+
+    if (!volunteer) {
+      return res.status(400).json({
+        success: false,
+        message: "Volunteer profile not found",
+      });
+    }
+
+    const volunteerId = volunteer._id;
+
     event.enrolledVolunteers = event.enrolledVolunteers.filter(
-      (v) => v.toString() !== volunteerId,
+      (v) => v.toString() !== volunteerId.toString(),
     );
 
     await event.save();
 
-    await Volunteer.findByIdAndUpdate(volunteerId, {
-      $pull: {
-        eventsEnrolled: event._id,
+    await Volunteer.findByIdAndUpdate(
+      volunteerId,
+      {
+        $pull: {
+          eventsJoined: event._id,
+        },
       },
-    });
+      { new: true },
+    );
+
+    await clearStatsCache();
 
     res.json({
       success: true,

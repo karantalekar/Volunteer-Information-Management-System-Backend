@@ -12,10 +12,11 @@ import { protect, adminOnly } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
-// All routes require login
+router.post("/", createVolunteer);
+
 router.use(protect);
 
-router.route("/").get(getAllVolunteers).post(createVolunteer);
+router.route("/").get(getAllVolunteers);
 
 router
   .route("/:id")

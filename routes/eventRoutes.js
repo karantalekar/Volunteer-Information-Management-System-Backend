@@ -9,21 +9,24 @@ import {
   unenrollVolunteer,
 } from "../controllers/eventController.js";
 
-import { protect, adminOnly } from "../middleware/authMiddleware.js";
+import {
+  protect,
+  adminOnly,
+  activeVolunteerOrAdmin,
+} from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
+router.get("/", getAllEvents);
+router.get("/:id", getEvent);
+
 router.use(protect);
 
-router.route("/").get(getAllEvents).post(adminOnly, createEvent);
+router.route("/").post(adminOnly, createEvent);
 
-router
-  .route("/:id")
-  .get(getEvent)
-  .put(adminOnly, updateEvent)
-  .delete(adminOnly, deleteEvent);
+router.route("/:id").put(adminOnly, updateEvent).delete(adminOnly, deleteEvent);
 
-router.post("/:id/enroll", enrollVolunteer);
-router.delete("/:id/unenroll", unenrollVolunteer);
+router.post("/:id/enroll", activeVolunteerOrAdmin, enrollVolunteer);
+router.delete("/:id/unenroll", activeVolunteerOrAdmin, unenrollVolunteer);
 
 export default router;

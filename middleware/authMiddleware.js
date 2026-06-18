@@ -1,5 +1,6 @@
 import jwt from "jsonwebtoken";
 import User from "../models/User.js";
+import Volunteer from "../models/Volunteer.js";
 
 // Protect routes — require valid JWT
 const protect = async (req, res, next) => {
@@ -22,15 +23,20 @@ const protect = async (req, res, next) => {
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    req.user = await User.findById(decoded.id);
+    let user = await User.findById(decoded.id);
 
-    if (!req.user) {
+    if (!user) {
+      user = await Volunteer.findById(decoded.id);
+    }
+
+    if (!user) {
       return res.status(401).json({
         success: false,
         message: "User no longer exists.",
       });
     }
 
+    req.user = user;
     next();
   } catch (error) {
     return res.status(401).json({
@@ -52,4 +58,19 @@ const adminOnly = (req, res, next) => {
   next();
 };
 
-export { protect, adminOnly };
+const activeVolunteerOrAdmin = (req, res, next) => {
+  if (req.user.role === "admin") {
+    return next();
+  }
+
+  if (req.user.status !== "active") {
+    return res.status(403).json({
+      success: false,
+      message: "Your volunteer profile must be approved by an admin before you can view events.",
+    });
+  }
+
+  next();
+};
+
+export { protect, adminOnly, activeVolunteerOrAdmin };
